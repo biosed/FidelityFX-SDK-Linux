@@ -77,7 +77,13 @@
 #define FFX_API __declspec(dllexport)
 #endif // #if defined (FFX_GCC)
 
+// Linux: wchar_t is 4 bytes (vs 2 on Windows), so private context structs with
+// wchar_t name arrays are larger. 2x headroom covers the difference.
+#ifdef _WIN32
 #define FFX_SDK_DEFAULT_CONTEXT_SIZE (1024 * 128)
+#else
+#define FFX_SDK_DEFAULT_CONTEXT_SIZE (1024 * 256)
+#endif
 
 /// Maximum supported number of simultaneously bound SRVs.
 ///

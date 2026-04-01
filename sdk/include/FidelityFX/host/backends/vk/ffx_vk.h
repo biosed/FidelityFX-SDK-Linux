@@ -87,9 +87,11 @@ FFX_API size_t ffxGetScratchMemorySizeVK(VkPhysicalDevice physicalDevice, size_t
 
 /// Convenience structure to hold all VK-related device information
 typedef struct VkDeviceContext {
-    VkDevice                vkDevice;           /// The Vulkan device
-    VkPhysicalDevice        vkPhysicalDevice;   /// The Vulkan physical device
-    PFN_vkGetDeviceProcAddr vkDeviceProcAddr;   /// The device's function address table
+    VkDevice                    vkDevice;           /// The Vulkan device
+    VkPhysicalDevice            vkPhysicalDevice;   /// The Vulkan physical device
+    PFN_vkGetDeviceProcAddr     vkDeviceProcAddr;   /// The device's function address table
+    PFN_vkGetInstanceProcAddr   vkInstanceProcAddr; /// Instance-level function loader (set for volk/Linux compatibility).
+    VkInstance                  vkInstance;          /// Vulkan instance (needed for vkGetInstanceProcAddr on Linux).
 } VkDeviceContext;
 
 /// Create a <c><i>FfxDevice</i></c> from a <c><i>VkDevice</i></c>.

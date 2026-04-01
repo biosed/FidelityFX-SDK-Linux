@@ -20,6 +20,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#include <cstring>
+#include <cmath>
+#include <cstdlib>
+#include <new>
+
 #include <FidelityFX/host/ffx_interface.h>
 #include <FidelityFX/host/ffx_util.h>
 #include <FidelityFX/host/ffx_assert.h>
@@ -30,7 +35,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <codecvt>  // this is deprecated so it's just a fallback solution
+#include "ffx_posix_compat.h"
 #endif  // _WIN32
 
 #include <vulkan/vulkan.h>
@@ -62,7 +67,27 @@ void                   BreadcrumbsPrintDeviceInfoVK(FfxInterface* backendInterfa
 void                   RegisterConstantBufferAllocatorVK(FfxInterface* backendInterface, FfxConstantBufferAllocator fpConstantAllocator);
 
 
-static VkDeviceContext sVkDeviceContext = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+static VkDeviceContext sVkDeviceContext = {};
+
+// Instance-level function pointers loaded via vkGetInstanceProcAddr.
+// On Linux with volk, global Vulkan symbols resolve to data addresses (function pointer
+// variables), not code — causing segfaults. These are loaded once in ffxGetDeviceVK
+// using the engine-provided vkGetInstanceProcAddr + VkInstance.
+static PFN_vkGetPhysicalDeviceProperties           s_pfnGetPhysicalDeviceProperties = nullptr;
+static PFN_vkGetPhysicalDeviceProperties2          s_pfnGetPhysicalDeviceProperties2 = nullptr;
+static PFN_vkGetPhysicalDeviceMemoryProperties     s_pfnGetPhysicalDeviceMemoryProperties = nullptr;
+static PFN_vkGetPhysicalDeviceFeatures             s_pfnGetPhysicalDeviceFeatures = nullptr;
+static PFN_vkGetPhysicalDeviceFeatures2            s_pfnGetPhysicalDeviceFeatures2 = nullptr;
+static PFN_vkEnumerateDeviceExtensionProperties    s_pfnEnumerateDeviceExtensionProperties = nullptr;
+
+// Redirect all global Vulkan instance-level calls through the loaded function pointers.
+// Falls back to the global symbol if not loaded (Windows, or pre-init calls).
+#define vkGetPhysicalDeviceProperties           (s_pfnGetPhysicalDeviceProperties ? s_pfnGetPhysicalDeviceProperties : vkGetPhysicalDeviceProperties)
+#define vkGetPhysicalDeviceProperties2          (s_pfnGetPhysicalDeviceProperties2 ? s_pfnGetPhysicalDeviceProperties2 : vkGetPhysicalDeviceProperties2)
+#define vkGetPhysicalDeviceMemoryProperties     (s_pfnGetPhysicalDeviceMemoryProperties ? s_pfnGetPhysicalDeviceMemoryProperties : vkGetPhysicalDeviceMemoryProperties)
+#define vkGetPhysicalDeviceFeatures             (s_pfnGetPhysicalDeviceFeatures ? s_pfnGetPhysicalDeviceFeatures : vkGetPhysicalDeviceFeatures)
+#define vkGetPhysicalDeviceFeatures2            (s_pfnGetPhysicalDeviceFeatures2 ? s_pfnGetPhysicalDeviceFeatures2 : vkGetPhysicalDeviceFeatures2)
+#define vkEnumerateDeviceExtensionProperties    (s_pfnEnumerateDeviceExtensionProperties ? s_pfnEnumerateDeviceExtensionProperties : vkEnumerateDeviceExtensionProperties)
 
 #define MAX_PIPELINE_USAGE_PER_FRAME      (10) // Required to make sure passes that are called more than once per-frame don't have their descriptors overwritten.
 #define MAX_DESCRIPTOR_SET_LAYOUTS        (64)
@@ -177,6 +202,20 @@ typedef struct BackendContext_VK {
     VkPhysicalDevice        physicalDevice = VK_NULL_HANDLE;
     VkFunctionTable         vkFunctionTable = {};
 
+    // Instance-level function pointers (loaded via vkGetInstanceProcAddr for volk compat)
+    PFN_vkGetPhysicalDeviceProperties           pfnGetPhysicalDeviceProperties = nullptr;
+    PFN_vkGetPhysicalDeviceProperties2          pfnGetPhysicalDeviceProperties2 = nullptr;
+    PFN_vkGetPhysicalDeviceMemoryProperties     pfnGetPhysicalDeviceMemoryProperties = nullptr;
+    PFN_vkGetPhysicalDeviceFeatures             pfnGetPhysicalDeviceFeatures = nullptr;
+    PFN_vkGetPhysicalDeviceFeatures2            pfnGetPhysicalDeviceFeatures2 = nullptr;
+    PFN_vkEnumerateDeviceExtensionProperties    pfnEnumerateDeviceExtensionProperties = nullptr;
+
+    // 1x1 dummy image bound to null-resource descriptor slots to prevent GPUVM faults.
+    VkImage             nullImage = VK_NULL_HANDLE;
+    VkDeviceMemory      nullImageMemory = VK_NULL_HANDLE;
+    VkImageView         nullImageViewSrv = VK_NULL_HANDLE;  // SAMPLED_IMAGE view
+    VkImageView         nullImageViewUav = VK_NULL_HANDLE;  // STORAGE_IMAGE view
+
     FfxGpuJobDescription*   pGpuJobs;
     uint32_t                gpuJobCount = 0;
 
@@ -272,12 +311,34 @@ typedef struct BackendContext_VK {
 
 } BackendContext_VK;
 
+// Cached physical device properties — loaded once in ffxGetScratchMemorySizeVK
+// (called from engine through volk, where global Vulkan dispatch works).
+// CreateBackendContextVK and findMemoryTypeIndex use the cache to avoid
+// calling global Vulkan instance-level functions through the Vulkan loader
+// (which fails when volk dispatch is active on Linux).
+static VkPhysicalDeviceMemoryProperties s_cachedMemProps = {};
+static VkPhysicalDeviceProperties s_cachedDevProps = {};
+static bool s_propsCached = false;
+
 FFX_API size_t ffxGetScratchMemorySizeVK(VkPhysicalDevice physicalDevice, size_t maxContexts)
 {
     uint32_t numExtensions = 0;
 
     if (physicalDevice)
+    {
         vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &numExtensions, nullptr);
+
+        // Cache device properties while we have a working Vulkan dispatch
+        // (called from engine through volk). CreateBackendContextVK and
+        // findMemoryTypeIndex need these but can't call global Vulkan
+        // instance-level functions safely (volk dispatch conflict on Linux).
+        if (!s_propsCached)
+        {
+            vkGetPhysicalDeviceMemoryProperties(physicalDevice, &s_cachedMemProps);
+            vkGetPhysicalDeviceProperties(physicalDevice, &s_cachedDevProps);
+            s_propsCached = true;
+        }
+    }
 
     uint32_t extensionPropArraySize = sizeof(VkExtensionProperties) * numExtensions;
     uint32_t gpuJobDescArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), sizeof(uint32_t));
@@ -288,7 +349,7 @@ FFX_API size_t ffxGetScratchMemorySizeVK(VkPhysicalDevice physicalDevice, size_t
     uint32_t contextArraySize = FFX_ALIGN_UP(maxContexts * sizeof(BackendContext_VK::EffectContext), sizeof(uint32_t));
     
     return FFX_ALIGN_UP(sizeof(BackendContext_VK) + extensionPropArraySize + gpuJobDescArraySize + resourceViewArraySize + stagingRingBufferArraySize +
-                            pipelineArraySize + resourceArraySize + contextArraySize,
+                            pipelineArraySize + resourceArraySize + contextArraySize + 31 /* alignas(32) padding for EffectContext */,
                         sizeof(uint64_t));
 }
 
@@ -296,6 +357,21 @@ FFX_API size_t ffxGetScratchMemorySizeVK(VkPhysicalDevice physicalDevice, size_t
 FfxDevice ffxGetDeviceVK(VkDeviceContext* vkDeviceContext)
 {
     sVkDeviceContext = *vkDeviceContext;
+
+    // Load instance-level function pointers for volk compatibility on Linux.
+    if (vkDeviceContext->vkInstanceProcAddr && vkDeviceContext->vkInstance)
+    {
+        VkInstance inst = vkDeviceContext->vkInstance;
+        auto ipfn = vkDeviceContext->vkInstanceProcAddr;
+        s_pfnGetPhysicalDeviceProperties        = (PFN_vkGetPhysicalDeviceProperties)ipfn(inst, "vkGetPhysicalDeviceProperties");
+        s_pfnGetPhysicalDeviceProperties2       = (PFN_vkGetPhysicalDeviceProperties2)ipfn(inst, "vkGetPhysicalDeviceProperties2");
+        s_pfnGetPhysicalDeviceMemoryProperties  = (PFN_vkGetPhysicalDeviceMemoryProperties)ipfn(inst, "vkGetPhysicalDeviceMemoryProperties");
+        s_pfnGetPhysicalDeviceFeatures          = (PFN_vkGetPhysicalDeviceFeatures)ipfn(inst, "vkGetPhysicalDeviceFeatures");
+        s_pfnGetPhysicalDeviceFeatures2         = (PFN_vkGetPhysicalDeviceFeatures2)ipfn(inst, "vkGetPhysicalDeviceFeatures2");
+        s_pfnEnumerateDeviceExtensionProperties = (PFN_vkEnumerateDeviceExtensionProperties)ipfn(inst, "vkEnumerateDeviceExtensionProperties");
+
+    }
+
     return reinterpret_cast<FfxDevice>(&sVkDeviceContext);
 }
 
@@ -394,12 +470,18 @@ FfxResource ffxGetResourceVK(void* vkResource,
     return resource;
 }
 
+// (moved to before ffxGetScratchMemorySizeVK)
+
 uint32_t findMemoryTypeIndex(VkPhysicalDevice physicalDevice, VkMemoryRequirements memRequirements, VkMemoryPropertyFlags requestedProperties, VkMemoryPropertyFlags& outProperties)
 {
     FFX_ASSERT(NULL != physicalDevice);
 
     VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+    if (s_propsCached) {
+        memProperties = s_cachedMemProps;
+    } else {
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+    }
 
     uint32_t bestCandidate = UINT32_MAX;
 
@@ -408,6 +490,10 @@ uint32_t findMemoryTypeIndex(VkPhysicalDevice physicalDevice, VkMemoryRequiremen
 
             // if just device-local memory is requested, make sure this is the invisible heap to prevent over-subscribing the local heap
             if (requestedProperties == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+                continue;
+
+            // Skip AMD device-coherent memory — requires deviceCoherentMemory feature which we don't enable
+            if (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD)
                 continue;
 
             bestCandidate = i;
@@ -1120,14 +1206,12 @@ void ConvertUTF16ToUTF8(const wchar_t* inputName, char* outputBuffer, size_t out
 void ConvertUTF8ToUTF16(const char* inputName, wchar_t* outputBuffer, size_t outputLen)
 {
     memset(outputBuffer, 0, outputLen * sizeof(wchar_t));
-    std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
-    wcscpy_s(outputBuffer, outputLen, converter.from_bytes(inputName).c_str());
+    ffxNarrowToWide(outputBuffer, outputLen, inputName);
 }
 void ConvertUTF16ToUTF8(const wchar_t* inputName, char* outputBuffer, size_t outputLen)
 {
     memset(outputBuffer, 0, outputLen * sizeof(char));
-    std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
-    strcpy_s(outputBuffer, outputLen, converter.to_bytes(inputName).c_str());
+    ffxWideToNarrow(outputBuffer, outputLen, inputName);
 }
 #endif  // _WIN32
 
@@ -1167,6 +1251,10 @@ void addBarrier(BackendContext_VK* backendContext, FfxResourceInternal* resource
 {
     FFX_ASSERT(NULL != backendContext);
     FFX_ASSERT(NULL != resource);
+
+    // Skip null resources (index 0 = FFX_RESOURCE_IDENTIFIER_NULL)
+    if (resource->internalIndex == 0)
+        return;
 
     BackendContext_VK::Resource& ffxResource = backendContext->pResources[resource->internalIndex];
 
@@ -1440,6 +1528,9 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
             backendContext->pResources[i].uavViewIndex = backendContext->pResources[i].srvViewIndex = -1;
         }
 
+        // Align pMem to match EffectContext's alignas(32) requirement.
+        // Without this, the compiler's aligned SSE stores (movaps) crash.
+        pMem = (uint8_t*)(((uintptr_t)pMem + 31) & ~(uintptr_t)31);
         // Map context array
         backendContext->pEffectContexts = (BackendContext_VK::EffectContext*)pMem;
         memset(backendContext->pEffectContexts, 0, contextArraySize);
@@ -1510,6 +1601,19 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
         backendContext->vkFunctionTable.vkCmdBeginDebugUtilsLabelEXT = (PFN_vkCmdBeginDebugUtilsLabelEXT)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkCmdBeginDebugUtilsLabelEXT");
         backendContext->vkFunctionTable.vkCmdEndDebugUtilsLabelEXT = (PFN_vkCmdEndDebugUtilsLabelEXT)vkDeviceContext->vkDeviceProcAddr(backendContext->device, "vkCmdEndDebugUtilsLabelEXT");
 
+        // Load instance-level functions via vkGetInstanceProcAddr (for volk compat on Linux).
+        if (vkDeviceContext->vkInstanceProcAddr && vkDeviceContext->vkInstance)
+        {
+            VkInstance inst = vkDeviceContext->vkInstance;
+            auto ipfn = vkDeviceContext->vkInstanceProcAddr;
+            backendContext->pfnGetPhysicalDeviceProperties        = (PFN_vkGetPhysicalDeviceProperties)ipfn(inst, "vkGetPhysicalDeviceProperties");
+            backendContext->pfnGetPhysicalDeviceProperties2       = (PFN_vkGetPhysicalDeviceProperties2)ipfn(inst, "vkGetPhysicalDeviceProperties2");
+            backendContext->pfnGetPhysicalDeviceMemoryProperties  = (PFN_vkGetPhysicalDeviceMemoryProperties)ipfn(inst, "vkGetPhysicalDeviceMemoryProperties");
+            backendContext->pfnGetPhysicalDeviceFeatures          = (PFN_vkGetPhysicalDeviceFeatures)ipfn(inst, "vkGetPhysicalDeviceFeatures");
+            backendContext->pfnGetPhysicalDeviceFeatures2         = (PFN_vkGetPhysicalDeviceFeatures2)ipfn(inst, "vkGetPhysicalDeviceFeatures2");
+            backendContext->pfnEnumerateDeviceExtensionProperties = (PFN_vkEnumerateDeviceExtensionProperties)ipfn(inst, "vkEnumerateDeviceExtensionProperties");
+        }
+
         // enumerate all the device extensions
         backendContext->numDeviceExtensions = 0;
         vkEnumerateDeviceExtensionProperties(backendContext->physicalDevice, nullptr, &backendContext->numDeviceExtensions, nullptr);
@@ -1542,9 +1646,10 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
 
         // allocate dynamic uniform buffer
         {
-            // get alignment
-            VkPhysicalDeviceProperties physicalDeviceProperties = {};
-            vkGetPhysicalDeviceProperties(backendContext->physicalDevice, &physicalDeviceProperties);
+            // get alignment — use cached properties (global Vulkan call conflicts with volk)
+            VkPhysicalDeviceProperties physicalDeviceProperties = s_propsCached ? s_cachedDevProps : VkPhysicalDeviceProperties{};
+            if (!s_propsCached)
+                vkGetPhysicalDeviceProperties(backendContext->physicalDevice, &physicalDeviceProperties);
             backendContext->uniformBufferAlignment = physicalDeviceProperties.limits.minUniformBufferOffsetAlignment;
 
             backendContext->uniformBufferSize =
@@ -1618,6 +1723,12 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
         }
 
         // Setup Breadcrumbs data
+        // NOTE: Skipped on Linux — breadcrumbs uses global Vulkan calls
+        // (vkGetPhysicalDeviceMemoryProperties, vkGetPhysicalDeviceFeatures etc.)
+        // that conflict with volk's function pointer dispatch.
+#ifndef _WIN32
+        backendContext->breadcrumbsMemoryIndex = UINT32_MAX;
+#else
         {
             FfxDeviceCapabilities devCaps = {};
             if (GetDeviceCapabilitiesVK(backendInterface, &devCaps) != FFX_OK)
@@ -1635,7 +1746,7 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
             bufferInfo.pQueueFamilyIndices = nullptr;
 
             VkBuffer testBuffer = VK_NULL_HANDLE;
-            if (vkCreateBuffer(backendContext->device, &bufferInfo, nullptr, &testBuffer) != VK_SUCCESS)
+            if (backendContext->vkFunctionTable.vkCreateBuffer(backendContext->device, &bufferInfo, nullptr, &testBuffer) != VK_SUCCESS)
             {
                 FFX_ASSERT_FAIL("Cannot create test Breadcrumbs buffer to find memory requirements!");
                 return FFX_ERROR_BACKEND_API_ERROR;
@@ -1717,6 +1828,55 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
             // Together with BREADCRUMBS_BUFFER_MARKER_ENABLED flag will switch to vkCmdWriteBufferMarker2AMD() to use new synchronization facilities
             if (devCaps.extendedSynchronizationSupported)
                 backendContext->breadcrumbsFlags |= BackendContext_VK::BREADCRUMBS_SYNCHRONIZATION2_ENABLED;
+        }
+#endif // _WIN32
+    }
+
+    // Create a 1x1 dummy image for null resource descriptor bindings.
+    // FSR3 upscale-only mode leaves frame-interpolation resources (dilatedDepth,
+    // dilatedMV, reconstructedPrevDepth) as null, but the shaders still reference
+    // these descriptor slots. Binding this dummy prevents GPUVM faults.
+    if (backendContext->nullImage == VK_NULL_HANDLE)
+    {
+        VkImageCreateInfo nullCI = {};
+        nullCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        nullCI.imageType = VK_IMAGE_TYPE_2D;
+        nullCI.format = VK_FORMAT_R8G8B8A8_UNORM;
+        nullCI.extent = {1, 1, 1};
+        nullCI.mipLevels = 1;
+        nullCI.arrayLayers = 1;
+        nullCI.samples = VK_SAMPLE_COUNT_1_BIT;
+        nullCI.tiling = VK_IMAGE_TILING_OPTIMAL;
+        nullCI.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        nullCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        nullCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        if (backendContext->vkFunctionTable.vkCreateImage(backendContext->device, &nullCI, nullptr, &backendContext->nullImage) == VK_SUCCESS)
+        {
+            VkMemoryRequirements memReq = {};
+            backendContext->vkFunctionTable.vkGetImageMemoryRequirements(backendContext->device, backendContext->nullImage, &memReq);
+
+            VkMemoryPropertyFlags nullMemProps;
+            VkMemoryAllocateInfo nullAllocInfo = {};
+            nullAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            nullAllocInfo.allocationSize = memReq.size;
+            nullAllocInfo.memoryTypeIndex = findMemoryTypeIndex(backendContext->physicalDevice, memReq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, nullMemProps);
+
+            if (nullAllocInfo.memoryTypeIndex != UINT32_MAX &&
+                backendContext->vkFunctionTable.vkAllocateMemory(backendContext->device, &nullAllocInfo, nullptr, &backendContext->nullImageMemory) == VK_SUCCESS)
+            {
+                backendContext->vkFunctionTable.vkBindImageMemory(backendContext->device, backendContext->nullImage, backendContext->nullImageMemory, 0);
+
+                VkImageViewCreateInfo viewCI = {};
+                viewCI.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                viewCI.image = backendContext->nullImage;
+                viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                viewCI.format = VK_FORMAT_R8G8B8A8_UNORM;
+                viewCI.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+                backendContext->vkFunctionTable.vkCreateImageView(backendContext->device, &viewCI, nullptr, &backendContext->nullImageViewSrv);
+                backendContext->vkFunctionTable.vkCreateImageView(backendContext->device, &viewCI, nullptr, &backendContext->nullImageViewUav);
+            }
         }
     }
 
@@ -2166,6 +2326,16 @@ FfxErrorCode DestroyBackendContextVK(FfxInterface* backendInterface, FfxUInt32 e
         backendContext->vkFunctionTable.vkUnmapMemory(backendContext->device, backendContext->uniformBufferMemory);
         backendContext->vkFunctionTable.vkFreeMemory(backendContext->device, backendContext->uniformBufferMemory, VK_NULL_HANDLE);
         backendContext->vkFunctionTable.vkDestroyBuffer(backendContext->device, backendContext->uniformBuffer, VK_NULL_HANDLE);
+
+        // clean up null-resource dummy image
+        if (backendContext->nullImageViewSrv)
+            backendContext->vkFunctionTable.vkDestroyImageView(backendContext->device, backendContext->nullImageViewSrv, nullptr);
+        if (backendContext->nullImageViewUav)
+            backendContext->vkFunctionTable.vkDestroyImageView(backendContext->device, backendContext->nullImageViewUav, nullptr);
+        if (backendContext->nullImage)
+            backendContext->vkFunctionTable.vkDestroyImage(backendContext->device, backendContext->nullImage, nullptr);
+        if (backendContext->nullImageMemory)
+            backendContext->vkFunctionTable.vkFreeMemory(backendContext->device, backendContext->nullImageMemory, nullptr);
 
         backendContext->device = VK_NULL_HANDLE;
         backendContext->physicalDevice = VK_NULL_HANDLE;
@@ -3753,9 +3923,25 @@ static FfxErrorCode executeGpuJobCompute(BackendContext_VK*    backendContext,
     {
         FfxTextureUAV& textureUAV = job->computeJobDescriptor.uavTextures[currentPipelineUavIndex];
 
-        // continue if this is a null resource.
+        // Bind dummy image for null resources to prevent uninitialized descriptor reads.
         if (job->computeJobDescriptor.uavTextures[currentPipelineUavIndex].resource.internalIndex == 0)
+        {
+            const FfxResourceBinding binding = job->computeJobDescriptor.pipeline.uavTextureBindings[currentPipelineUavIndex];
+            writeDescriptorSets[descriptorWriteIndex] = {};
+            writeDescriptorSets[descriptorWriteIndex].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writeDescriptorSets[descriptorWriteIndex].dstSet = pipelineLayout->descriptorSets[pipelineLayout->descriptorSetIndex];
+            writeDescriptorSets[descriptorWriteIndex].descriptorCount = 1;
+            writeDescriptorSets[descriptorWriteIndex].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            writeDescriptorSets[descriptorWriteIndex].pImageInfo = &imageDescriptorInfos[imageDescriptorIndex];
+            writeDescriptorSets[descriptorWriteIndex].dstBinding = binding.slotIndex;
+            writeDescriptorSets[descriptorWriteIndex].dstArrayElement = binding.arrayIndex;
+            imageDescriptorInfos[imageDescriptorIndex] = {};
+            imageDescriptorInfos[imageDescriptorIndex].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            imageDescriptorInfos[imageDescriptorIndex].imageView = backendContext->nullImageViewUav;
+            imageDescriptorIndex++;
+            descriptorWriteIndex++;
             continue;
+        }
 
         addBarrier(backendContext, &textureUAV.resource, FFX_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -3769,7 +3955,8 @@ static FfxErrorCode executeGpuJobCompute(BackendContext_VK*    backendContext,
         uint32_t mipOffset = textureUAV.mip;
         if (textureUAV.mip >= backendContext->pResources[resourceIndex].resourceDescription.mipCount)
             mipOffset = backendContext->pResources[resourceIndex].resourceDescription.mipCount - 1;
-        const uint32_t uavViewIndex  = backendContext->pResources[resourceIndex].uavViewIndex + mipOffset;
+        const int32_t uavViewBase = backendContext->pResources[resourceIndex].uavViewIndex;
+        const uint32_t uavViewIndex = (uint32_t)(uavViewBase + mipOffset);
 
         writeDescriptorSets[descriptorWriteIndex]                 = {};
         writeDescriptorSets[descriptorWriteIndex].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -3830,9 +4017,25 @@ static FfxErrorCode executeGpuJobCompute(BackendContext_VK*    backendContext,
     {
         FfxTextureSRV& textureSRV = job->computeJobDescriptor.srvTextures[currentPipelineSrvIndex];
 
-        // continue if this is a null resource.
+        // Bind dummy image for null resources to prevent uninitialized descriptor reads.
         if (job->computeJobDescriptor.srvTextures[currentPipelineSrvIndex].resource.internalIndex == 0)
+        {
+            const FfxResourceBinding binding = job->computeJobDescriptor.pipeline.srvTextureBindings[currentPipelineSrvIndex];
+            writeDescriptorSets[descriptorWriteIndex] = {};
+            writeDescriptorSets[descriptorWriteIndex].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writeDescriptorSets[descriptorWriteIndex].dstSet = pipelineLayout->descriptorSets[pipelineLayout->descriptorSetIndex];
+            writeDescriptorSets[descriptorWriteIndex].descriptorCount = 1;
+            writeDescriptorSets[descriptorWriteIndex].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            writeDescriptorSets[descriptorWriteIndex].pImageInfo = &imageDescriptorInfos[imageDescriptorIndex];
+            writeDescriptorSets[descriptorWriteIndex].dstBinding = binding.slotIndex;
+            writeDescriptorSets[descriptorWriteIndex].dstArrayElement = binding.arrayIndex;
+            imageDescriptorInfos[imageDescriptorIndex] = {};
+            imageDescriptorInfos[imageDescriptorIndex].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageDescriptorInfos[imageDescriptorIndex].imageView = backendContext->nullImageViewSrv;
+            imageDescriptorIndex++;
+            descriptorWriteIndex++;
             continue;
+        }
 
         addBarrier(backendContext, &textureSRV.resource, FFX_RESOURCE_STATE_COMPUTE_READ);
 
@@ -3851,11 +4054,11 @@ static FfxErrorCode executeGpuJobCompute(BackendContext_VK*    backendContext,
         writeDescriptorSets[descriptorWriteIndex].dstArrayElement = binding.arrayIndex;
 
         const uint32_t resourceIndex = textureSRV.resource.internalIndex;
-        const uint32_t srvViewIndex  = backendContext->pResources[resourceIndex].srvViewIndex;
+        const int32_t srvViewIndex  = backendContext->pResources[resourceIndex].srvViewIndex;
 
         imageDescriptorInfos[imageDescriptorIndex]             = {};
         imageDescriptorInfos[imageDescriptorIndex].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageDescriptorInfos[imageDescriptorIndex].imageView   = backendContext->pResourceViews[srvViewIndex].imageView;
+        imageDescriptorInfos[imageDescriptorIndex].imageView   = backendContext->pResourceViews[(uint32_t)srvViewIndex].imageView;
 
         imageDescriptorIndex++;
         descriptorWriteIndex++;
@@ -4114,6 +4317,10 @@ static FfxErrorCode executeGpuJobClearFloat(BackendContext_VK* backendContext, F
     uint32_t idx = job->clearJobDescriptor.target.internalIndex;
     BackendContext_VK::Resource ffxResource = backendContext->pResources[idx];
 
+    // Skip null resources (upscale-only mode leaves some frame-interpolation resources unset)
+    if (ffxResource.imageResource == VK_NULL_HANDLE && ffxResource.bufferResource == VK_NULL_HANDLE)
+        return FFX_OK;
+
     if (ffxResource.resourceDescription.type == FFX_RESOURCE_TYPE_BUFFER)
     {
         addBarrier(backendContext, &job->clearJobDescriptor.target, FFX_RESOURCE_STATE_COPY_DEST);
@@ -4173,7 +4380,6 @@ FfxErrorCode ExecuteGpuJobsVK(FfxInterface* backendInterface, FfxCommandList com
             beginMarkerVK(backendContext, vkCommandBuffer, gpuJob->jobLabel);
         }
 
-        
         switch (gpuJob->jobType)
         {
         case FFX_GPU_JOB_CLEAR_FLOAT:
@@ -4188,6 +4394,18 @@ FfxErrorCode ExecuteGpuJobsVK(FfxInterface* backendInterface, FfxCommandList com
         }
         case FFX_GPU_JOB_COMPUTE:
         {
+            // Log compute pass name for debugging GPUVM faults
+            if (gpuJob->jobLabel[0]) {
+                char passName[128];
+                wcstombs(passName, gpuJob->jobLabel, sizeof(passName) - 1);
+                passName[127] = '\0';
+                fprintf(stderr, "FFX DIAG: compute pass: %s dims=[%u,%u,%u]\n",
+                        passName,
+                        gpuJob->computeJobDescriptor.dimensions[0],
+                        gpuJob->computeJobDescriptor.dimensions[1],
+                        gpuJob->computeJobDescriptor.dimensions[2]);
+                fflush(stderr);
+            }
             errorCode = executeGpuJobCompute(backendContext, gpuJob, vkCommandBuffer, effectContextId);
             break;
         }

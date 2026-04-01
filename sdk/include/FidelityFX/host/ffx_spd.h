@@ -57,7 +57,12 @@
 /// The size of the context specified in 32bit values.
 ///
 /// @ingroup FfxSpd
+// Linux: wchar_t is 4 bytes — private struct larger than Windows.
+#ifdef _WIN32
 #define FFX_SPD_CONTEXT_SIZE       (9300)
+#else
+#define FFX_SPD_CONTEXT_SIZE       (18600)
+#endif
 
 /// If this ever changes, need to also reflect a change in number
 /// of resources in ffx_spd_resources.h

@@ -53,9 +53,34 @@ file(GLOB PRIVATE_SOURCE
 	"${FFX_SRC_BACKENDS_PATH}/shared/blob_accessors/"
     "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
+)
+
+# FrameInterpolationSwapchain requires Win32 threading — exclude on Linux.
+if(NOT UNIX)
+file(GLOB FI_SWAPCHAIN_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/FrameInterpolationSwapchain/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/FrameInterpolationSwapchain/*.cpp"
 )
+list(APPEND PRIVATE_SOURCE ${FI_SWAPCHAIN_SOURCE})
+endif()
+
+# On Linux, component API sources must be compiled into the monolithic backend
+# library (AMD's Windows build produces them as separate static libs).
+if(UNIX)
+    set(FFX_COMPONENTS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../components")
+    list(APPEND PRIVATE_SOURCE
+        "${FFX_COMPONENTS_PATH}/fsr3upscaler/ffx_fsr3upscaler.cpp"
+        "${FFX_COMPONENTS_PATH}/opticalflow/ffx_opticalflow.cpp"
+        "${FFX_COMPONENTS_PATH}/frameinterpolation/ffx_frameinterpolation.cpp"
+        "${FFX_COMPONENTS_PATH}/spd/ffx_spd.cpp"
+        "${FFX_SHARED_PATH}/ffx_object_management.cpp"
+    )
+    # Force-include POSIX compat header for component sources (they use _countof, wcscmp, etc.)
+    # Do NOT use VK_NO_PROTOTYPES here — FFX must call Vulkan functions through libvulkan.so,
+    # not volk's data symbols. Building as a shared library ensures GOT entries resolve to
+    # the Vulkan loader at runtime, avoiding the linker GOT relaxation issue with volk.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${CMAKE_CURRENT_SOURCE_DIR}/ffx_posix_compat.h")
+endif()
 
 if (FFX_FSR1 OR FFX_ALL)
 	set(FFX_FSR1_PRIVATE_SOURCE
@@ -403,8 +428,18 @@ endif()
 file(GLOB_RECURSE PUBLIC_SOURCE
     "${FFX_HOST_BACKENDS_PATH}/vk/*.h")
 
-if (FFX_BUILD_AS_DLL)
+if (FFX_BUILD_AS_DLL OR UNIX)
+    # On Linux: build as shared library so Vulkan calls resolve to libvulkan.so
+    # at runtime, not volk's data symbols in the engine binary.
     add_library(ffx_backend_vk_${FFX_PLATFORM_NAME} SHARED ${PRIVATE_SOURCE} ${PUBLIC_SOURCE} ${PRIVATE_SHADERS} ${PUBLIC_SHADERS})
+    if(UNIX)
+        # -Bsymbolic: resolve Vulkan symbols to libvulkan.so within this .so,
+        # NOT to volk's data symbols in the main executable. Without this, ELF
+        # symbol interposition causes the .so to call volk's function pointer
+        # variables as code addresses → segfault.
+        target_link_libraries(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE Vulkan::Vulkan)
+        target_link_options(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE -Wl,-Bsymbolic)
+    endif()
 else()
     add_library(ffx_backend_vk_${FFX_PLATFORM_NAME} STATIC ${PRIVATE_SOURCE} ${PUBLIC_SOURCE} ${PRIVATE_SHADERS} ${PUBLIC_SHADERS})
 endif()
@@ -425,7 +460,7 @@ target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE ${FFX_SHA
 target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE "${FFX_SRC_BACKENDS_PATH}/shared")
 target_include_directories(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE ${FFX_PASS_SHADER_OUTPUT_PATH})
 
-target_link_libraries(ffx_backend_vk_${FFX_PLATFORM_NAME} "Vulkan::Vulkan")
+target_link_libraries(ffx_backend_vk_${FFX_PLATFORM_NAME} PRIVATE Vulkan::Vulkan)
 
 set_source_files_properties(${PRIVATE_SHADERS} PROPERTIES HEADER_FILE_ONLY TRUE)
 set_source_files_properties(${PUBLIC_SHADERS} PROPERTIES HEADER_FILE_ONLY TRUE)

@@ -23,8 +23,15 @@
 #pragma once
 
 #include <cstdint>
-#include <cstdio>      // sprintf_s
+#include <cstdio>
+#include <cstring>
 #include <FidelityFX/host/ffx_assert.h>
+
+#ifndef _WIN32
+#ifndef sprintf_s
+#define sprintf_s(buf, size, ...) snprintf(buf, size, __VA_ARGS__)
+#endif
+#endif
 
 #define FFX_BREADCRUMBS_APPEND_STRING(buff, count, str)                                  \
     do                                                                                   \
