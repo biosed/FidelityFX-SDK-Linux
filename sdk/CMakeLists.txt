@@ -179,7 +179,7 @@ endif()
 
 # Setup common variables
 if(UNIX)
-    set(FFX_SC_EXECUTABLE ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/FidelityFX_SC_linux.sh)
+    set(FFX_SC_EXECUTABLE python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/ffx_sc_native.py)
 else()
     set(FFX_SC_EXECUTABLE ${CMAKE_CURRENT_SOURCE_DIR}/tools/binary_store/FidelityFX_SC.exe)
 endif()
