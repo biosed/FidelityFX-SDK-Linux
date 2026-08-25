@@ -22,6 +22,9 @@
 
 #pragma once
 
+#if __cplusplus >= 202002L
+#include <bit>
+#endif
 #include <FidelityFX/host/ffx_types.h>
 
 /// @defgroup Utils Utilities
