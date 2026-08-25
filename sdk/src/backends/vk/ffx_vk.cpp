@@ -4394,8 +4394,13 @@ FfxErrorCode ExecuteGpuJobsVK(FfxInterface* backendInterface, FfxCommandList com
         }
         case FFX_GPU_JOB_COMPUTE:
         {
-            // Log compute pass name for debugging GPUVM faults
-            if (gpuJob->jobLabel[0]) {
+            // Per-pass diagnostic logging (GPUVM fault debugging) — opt-in
+            // via FFX_DIAG_PASSES=1; unconditional per-frame spam otherwise.
+            static const bool sDiagPasses = []() {
+                const char* env = getenv("FFX_DIAG_PASSES");
+                return env != nullptr && env[0] == '1';
+            }();
+            if (sDiagPasses && gpuJob->jobLabel[0]) {
                 char passName[128];
                 wcstombs(passName, gpuJob->jobLabel, sizeof(passName) - 1);
                 passName[127] = '\0';
