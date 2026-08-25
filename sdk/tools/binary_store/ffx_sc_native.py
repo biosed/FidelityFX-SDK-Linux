@@ -909,8 +909,18 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Determine which permutation options are referenced in source.
-    found_flags = scan_source_for_defines(
-        args.input_file, args.include_paths, args.perm_defines)
+    #
+    # FIX 2026-08-26: the text scan is UNSOUND — it failed to traverse the
+    # FFX include chain, marked most options "not found", and the early-
+    # duplicate shortcut then mapped every value of those options to the
+    # value-0 blob WITHOUT COMPILING. Net effect: nearly all FSR3 passes
+    # shipped a single permutation compiled with every option = 0 (non-HDR,
+    # display-res MVs, STANDARD-Z on a reverse-Z engine) regardless of the
+    # flags the runtime requested — the root cause of the FSR3 quality
+    # failures on both Photon and Iridium. Treat every option as referenced:
+    # every permutation is actually compiled, and the post-compile md5 dedup
+    # (which is sound) collapses genuinely identical blobs.
+    found_flags = [True] * len(args.perm_defines)
 
     # Sort: options found in shader first (matches original stable_partition).
     indexed_options = list(enumerate(args.perm_defines))
