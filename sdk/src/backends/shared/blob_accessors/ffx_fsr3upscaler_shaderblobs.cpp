@@ -68,6 +68,8 @@
 #include <ffx_fsr3upscaler_luma_instability_pass_wave64_16bit_permutations.h>
 #include <ffx_fsr3upscaler_debug_view_pass_wave64_16bit_permutations.h>
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h> // for memset
 
 #if defined(POPULATE_PERMUTATION_KEY)

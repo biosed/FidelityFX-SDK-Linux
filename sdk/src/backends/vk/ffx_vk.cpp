@@ -2354,6 +2354,21 @@ FfxErrorCode CreateResourceVK(
     FfxResourceInternal* outResource)
 {
     FFX_ASSERT(NULL != backendInterface);
+    // TEMP DIAG: internal resource size audit (FFX_DIAG_PASSES=1).
+    {
+        const char* env = getenv("FFX_DIAG_PASSES");
+        if (env && env[0] == '1' && createResourceDescription) {
+            char nm[128] = {0};
+            if (createResourceDescription->name)
+                wcstombs(nm, createResourceDescription->name, sizeof(nm)-1);
+            fprintf(stderr, "FFX DIAG: createResource '%s' type=%d %ux%u fmt=%d\n",
+                    nm, (int)createResourceDescription->resourceDescription.type,
+                    createResourceDescription->resourceDescription.width,
+                    createResourceDescription->resourceDescription.height,
+                    (int)createResourceDescription->resourceDescription.format);
+            fflush(stderr);
+        }
+    }
     FFX_ASSERT(NULL != createResourceDescription);
     FFX_ASSERT(NULL != outResource);
     FFX_ASSERT_MESSAGE(createResourceDescription->initData.type != FFX_RESOURCE_INIT_DATA_TYPE_INVALID,
