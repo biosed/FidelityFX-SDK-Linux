@@ -373,3 +373,28 @@ sdk/src/components/fsr3/FSR3_GDK/Gaming.Xbox.Scarlett.x64/
 sdk/src/components/fsr3upscaler/FSR3Upscaler_GDK/Gaming.Xbox.Scarlett.x64/
 
 sdk/src/components/opticalflow/OpticalFlow_GDK/Gaming.Xbox.Scarlett.x64/
+
+# ---------------------------------------------------------------------------
+# Linux/Vulkan fork additions
+# ---------------------------------------------------------------------------
+
+# Out-of-source CMake build trees. The upstream `[Bb]uild/` rule above does not
+# match these. Build outputs are not tracked; see README.md for how to rebuild.
+build_linux/
+build-linux/
+sdk/build_linux/
+
+# CMake artifacts anywhere in the tree
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Shader compiler output. SPIR-V is generated from the HLSL/GLSL in
+# sdk/include/FidelityFX/gpu by ffx_sc_native.py at build time.
+*.spv
+
+# Object files and local build products (upstream covers *.obj, not *.o)
+*.o
+*.o.d
+*.d
