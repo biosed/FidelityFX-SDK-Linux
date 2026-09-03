@@ -917,7 +917,7 @@ def main():
     # shipped a single permutation compiled with every option = 0 (non-HDR,
     # display-res MVs, STANDARD-Z on a reverse-Z engine) regardless of the
     # flags the runtime requested — the root cause of the FSR3 quality
-    # failures on both Photon and Iridium. Treat every option as referenced:
+    # failures observed on reverse-Z renderers. Treat every option as referenced:
     # every permutation is actually compiled, and the post-compile md5 dedup
     # (which is sound) collapses genuinely identical blobs.
     found_flags = [True] * len(args.perm_defines)
