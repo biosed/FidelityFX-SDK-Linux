@@ -419,20 +419,27 @@ static FfxErrorCode createPipelineStates(FfxFsr3UpscalerContext_Private* context
         useLut         = true;
         canForceWave64 = haveShaderModel66;
     }
-    // Linux/glslang port (2026-08-26): the USE_LANCZOS_TYPE=LUT shader
-    // permutations are MISCOMPILED by the glslang toolchain — the LUT-driven
-    // history/upsample kernel degenerates into a strong low-pass, so
-    // converged output lost ~60% of its edge energy (measured MTF floor
-    // ~0.36 at Nyquist) and the upscaler read as "blurry". The reference
-    // analytic-Lanczos permutations are correct (converged static edge
-    // energy 6.65 vs 2.61 with the LUT, raw raster 5.80). Force the
-    // reference path on this toolchain until the LUT permutation codegen is
-    // root-caused; the ALU cost difference is negligible on modern GPUs.
     else
     {
         canForceWave64 = false;
     }
+
+#ifndef _WIN32
+    // Linux/glslang port: the USE_LANCZOS_TYPE=LUT shader permutations are
+    // MISCOMPILED by the glslang toolchain — the LUT-driven history/upsample
+    // kernel degenerates into a strong low-pass, so converged output lost
+    // ~60% of its edge energy (measured MTF floor ~0.36 at Nyquist) and the
+    // upscaler read as "blurry". The reference analytic-Lanczos permutations
+    // are correct (converged static edge energy 6.65 vs 2.61 with the LUT,
+    // raw raster 5.80). Force the reference path until the LUT permutation
+    // codegen is root-caused; the ALU cost difference is negligible.
+    //
+    // Scoped to non-Windows deliberately: this is a workaround for the
+    // toolchain, not the algorithm. A Windows build compiles these
+    // permutations with DXC (or the bundled glslang 11.12) and does not
+    // exhibit the miscompile, so upstream LUT selection stands there.
     useLut = false;
+#endif
 
     // Work out what permutation to load.
     uint32_t contextFlags = context->contextDescription.flags;

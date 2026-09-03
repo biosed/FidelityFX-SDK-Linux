@@ -46,6 +46,29 @@ The 1.1.4 base is therefore deliberate, not stale.
 
 Everything not listed is upstream code that this fork does not attempt to build on Linux.
 
+### Windows builds
+
+This fork is not intended to change the Windows build. Every portability change is
+behind a `_WIN32`, `UNIX` or `MSVC` guard, so a Windows configure resolves to upstream's
+sources and flags — including the `FrameInterpolationSwapchain` sources, which are
+excluded on Linux only. The FSR3 LUT-Lanczos workaround described below is likewise
+scoped to non-Windows: it is a glslang toolchain workaround, not an algorithm change.
+
+Two changes are shared with Windows deliberately, both of them fixes:
+
+- `CMakeCompileShaders.txt` now returns the collected permutation headers. Upstream's
+  `set(${PERMUTATION_OUTPUTS} ${PERMUTATION_OUTPUTS} PARENT_SCOPE)` propagated the
+  variable *name* rather than the headers appended to it.
+- `<bit>` is included for `std::popcount`, which the standard requires.
+
+**The Windows build is not verified here.** This fork is developed on Linux, and the
+development machine has no MSVC or Windows SDK. What *is* verified is that AMD's
+`FidelityFX_SC.exe` runs correctly under Wine and that its output agrees with
+`ffx_sc_native.py`: for the same shader and arguments, both produce permutation tables
+and reflection data that are identical (same CBV/SRV/UAV counts, same table shape). The
+SPIR-V blob itself differs, because the bundled `glslangValidator.exe` is 11.12.0 while
+the system glslang used by the native path is 16.4.0.
+
 ---
 
 ## Building
