@@ -12,6 +12,21 @@ one and fixes the portability and correctness problems that surfaced along the w
 
 The focus is **FSR3 upscaling**. See [Scope](#scope) for what is and isn't ported.
 
+### Why 1.1.4, and not a 2.x release
+
+Because **1.1.4 is the last upstream release that ships a Vulkan backend.** AMD removed
+it in 2.0.0: 1.1.4 carries 270 Vulkan/GLSL source files, 2.0.0 and later carry three
+incidental ones (a vendored VMA header, a GLSL callbacks header inside a DX12 sample).
+
+FSR3 itself is still very much present in 2.x — the upscaler headers and
+`ffx_fsr3upscaler.cpp` are all there — so the version gap is not about FSR3 being
+dropped. But 2.x restructures the SDK around `Kits/FidelityFX/`, its `backend/`
+directory contains only `dx12/`, and DX12 is distributed as signed prebuilt DLLs.
+There is no Vulkan backend in 2.x to port, so retargeting it would mean writing one
+from scratch against a restructured SDK, not rebasing this work.
+
+The 1.1.4 base is therefore deliberate, not stale.
+
 > This is an unofficial, community fork. It is not built, endorsed, or supported by AMD.
 > For AMD's original SDK documentation, see [README-upstream.md](README-upstream.md).
 
