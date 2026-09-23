@@ -90,6 +90,9 @@ static PFN_vkEnumerateDeviceExtensionProperties    s_pfnEnumerateDeviceExtension
 #define vkEnumerateDeviceExtensionProperties    (s_pfnEnumerateDeviceExtensionProperties ? s_pfnEnumerateDeviceExtensionProperties : vkEnumerateDeviceExtensionProperties)
 
 #define MAX_PIPELINE_USAGE_PER_FRAME      (10) // Required to make sure passes that are called more than once per-frame don't have their descriptors overwritten.
+// Dynamic image views are destroyed FFX_VK_VIEW_QUEUED_FRAMES unregisters after creation. Frame interpolation
+// unregisters twice per frame (prepare and dispatch), so the ring holds two unregisters per queued frame.
+#define FFX_VK_VIEW_QUEUED_FRAMES         (FFX_MAX_QUEUED_FRAMES * 2)
 #define MAX_DESCRIPTOR_SET_LAYOUTS        (64)
 #define FFX_MAX_BINDLESS_DESCRIPTOR_COUNT (65536)
 
@@ -250,7 +253,7 @@ typedef struct BackendContext_VK {
 
         // UAV offsets
         uint32_t              nextStaticResourceView;
-        uint32_t              nextDynamicResourceView[FFX_MAX_QUEUED_FRAMES];
+        uint32_t              nextDynamicResourceView[FFX_VK_VIEW_QUEUED_FRAMES];
 
         // Bindless descriptors
         uint32_t              bindlessTextureSrvHeapStart;
@@ -342,7 +345,7 @@ FFX_API size_t ffxGetScratchMemorySizeVK(VkPhysicalDevice physicalDevice, size_t
 
     uint32_t extensionPropArraySize = sizeof(VkExtensionProperties) * numExtensions;
     uint32_t gpuJobDescArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), sizeof(uint32_t));
-    uint32_t resourceViewArraySize = FFX_ALIGN_UP(((maxContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), sizeof(uint32_t));
+    uint32_t resourceViewArraySize = FFX_ALIGN_UP(((maxContexts * FFX_VK_VIEW_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), sizeof(uint32_t));
     uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(maxContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, sizeof(uint32_t));
     uint32_t pipelineArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), sizeof(uint32_t));
     uint32_t resourceArraySize = FFX_ALIGN_UP(maxContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), sizeof(uint32_t));
@@ -1046,7 +1049,7 @@ uint32_t getDynamicResourcesStartIndex(uint32_t effectContextId)
 uint32_t getDynamicResourceViewsStartIndex(uint32_t effectContextId, uint32_t frameIndex)
 {
     // dynamic resource views are tracked from the max index
-    return (effectContextId * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + (frameIndex * FFX_MAX_RESOURCE_COUNT * 2) + (FFX_MAX_RESOURCE_COUNT * 2) - 1;
+    return (effectContextId * FFX_VK_VIEW_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + (frameIndex * FFX_MAX_RESOURCE_COUNT * 2) + (FFX_MAX_RESOURCE_COUNT * 2) - 1;
 }
 
 void destroyDynamicViews(BackendContext_VK* backendContext, uint32_t effectContextId, uint32_t frameIndex)
@@ -1491,7 +1494,7 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
 
         // Map all of our pointers
         uint32_t gpuJobDescArraySize   = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_GPU_JOBS * sizeof(FfxGpuJobDescription), sizeof(uint32_t));
-        uint32_t resourceViewArraySize = FFX_ALIGN_UP(((backendContext->maxEffectContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), sizeof(uint32_t));
+        uint32_t resourceViewArraySize = FFX_ALIGN_UP(((backendContext->maxEffectContexts * FFX_VK_VIEW_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2) + FFX_MAX_BINDLESS_DESCRIPTOR_COUNT) * sizeof(BackendContext_VK::VkResourceView), sizeof(uint32_t));
         uint32_t stagingRingBufferArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_CONSTANT_BUFFER_RING_BUFFER_SIZE, sizeof(uint32_t));
         uint32_t pipelineArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * sizeof(BackendContext_VK::PipelineLayout), sizeof(uint32_t));
         uint32_t resourceArraySize = FFX_ALIGN_UP(backendContext->maxEffectContexts * FFX_MAX_RESOURCE_COUNT * sizeof(BackendContext_VK::Resource), sizeof(uint32_t));
@@ -1633,7 +1636,7 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
         descriptorPoolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         descriptorPoolCreateInfo.pNext = nullptr;
         descriptorPoolCreateInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        descriptorPoolCreateInfo.poolSizeCount = 5;
+        descriptorPoolCreateInfo.poolSizeCount = FFX_ARRAY_ELEMENTS(poolSizes);
         descriptorPoolCreateInfo.pPoolSizes = poolSizes;
         descriptorPoolCreateInfo.maxSets = backendContext->maxEffectContexts * FFX_MAX_PASS_COUNT * MAX_PIPELINE_USAGE_PER_FRAME * FFX_MAX_QUEUED_FRAMES;
 
@@ -1642,7 +1645,7 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
         }
 
         // set bindless resource view to base
-        backendContext->bindlessBase = (backendContext->maxEffectContexts * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2);
+        backendContext->bindlessBase = (backendContext->maxEffectContexts * FFX_VK_VIEW_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2);
 
         // allocate dynamic uniform buffer
         {
@@ -1895,8 +1898,8 @@ FfxErrorCode CreateBackendContextVK(FfxInterface* backendInterface, FfxEffect ef
 
             effectContext.nextStaticResource = (i * FFX_MAX_RESOURCE_COUNT) + 1;
             effectContext.nextDynamicResource = getDynamicResourcesStartIndex(i);
-            effectContext.nextStaticResourceView = (i * FFX_MAX_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2);
-            for (uint32_t frameIndex = 0; frameIndex < FFX_MAX_QUEUED_FRAMES; ++frameIndex)
+            effectContext.nextStaticResourceView = (i * FFX_VK_VIEW_QUEUED_FRAMES * FFX_MAX_RESOURCE_COUNT * 2);
+            for (uint32_t frameIndex = 0; frameIndex < FFX_VK_VIEW_QUEUED_FRAMES; ++frameIndex)
             {
                 effectContext.nextDynamicResourceView[frameIndex] = getDynamicResourceViewsStartIndex(i, frameIndex);
             }
@@ -2267,7 +2270,7 @@ FfxErrorCode DestroyBackendContextVK(FfxInterface* backendInterface, FfxUInt32 e
         }
     }
 
-    for (uint32_t frameIndex = 0; frameIndex < FFX_MAX_QUEUED_FRAMES; ++frameIndex)
+    for (uint32_t frameIndex = 0; frameIndex < FFX_VK_VIEW_QUEUED_FRAMES; ++frameIndex)
         destroyDynamicViews(backendContext, effectContextId, frameIndex);
 
     // clean up descriptor set layouts
@@ -3028,7 +3031,7 @@ FfxErrorCode UnregisterResourcesVK(FfxInterface* backendInterface, FfxCommandLis
     effectContext.nextDynamicResource = dynamicResourceIndexStart;
 
     // destroy the views of the next frame
-    effectContext.frameIndex = (effectContext.frameIndex + 1) % FFX_MAX_QUEUED_FRAMES;
+    effectContext.frameIndex = (effectContext.frameIndex + 1) % FFX_VK_VIEW_QUEUED_FRAMES;
     destroyDynamicViews(backendContext, effectContextId, effectContext.frameIndex);
 
     return FFX_OK;

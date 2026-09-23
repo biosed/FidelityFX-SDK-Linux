@@ -10,7 +10,7 @@ functions, and — the real blocker — every shader permutation is compiled by
 `FidelityFX_SC.exe`, a Windows binary. This fork replaces that toolchain with a native
 one and fixes the portability and correctness problems that surfaced along the way.
 
-The focus is **FSR3 upscaling**. See [Scope](#scope) for what is and isn't ported.
+The focus is **FSR3 upscaling and frame interpolation**. See [Scope](#scope) for what is and isn't ported.
 
 ### Why 1.1.4, and not a 2.x release
 
@@ -39,7 +39,7 @@ The 1.1.4 base is therefore deliberate, not stale.
 | FSR3 Upscaler (`FFX_FSR3UPSCALER`) | **Working** — the primary target of this port |
 | Single Pass Downsampler (`FFX_SPD`) | **Working** |
 | Vulkan backend (`ffx_backend_vk_x64`) | **Working** — builds as a shared library |
-| Optical Flow / Frame Interpolation | Compiles into the backend; **not validated** |
+| Optical Flow (`FFX_OF`) / Frame Interpolation (`FFX_FI`) | **Working** — driven through the raw prepare/dispatch API |
 | Frame Interpolation **Swapchain** | **Excluded** — depends on Win32 threading primitives |
 | DirectX 12 backend | Windows-only, untouched by this fork |
 | Cauldron framework & samples | Windows-only, untouched by this fork |
@@ -99,13 +99,15 @@ cmake -S sdk -B sdk/build_linux \
     -DFFX_API_BACKEND=VK_X64 \
     -DFFX_FSR3UPSCALER=ON \
     -DFFX_SPD=ON \
+    -DFFX_FI=ON \
+    -DFFX_OF=ON \
     -DFFX_AUTO_COMPILE_SHADERS=ON
 
 cmake --build sdk/build_linux -j"$(nproc)"
 ```
 
 The first build compiles every shader permutation through `ffx_sc_native.py` and takes
-a couple of minutes; the configuration above yields 252 deduplicated permutation
+a couple of minutes; the configuration above yields 300 deduplicated permutation
 headers. Subsequent builds are incremental.
 
 ### Output
@@ -224,6 +226,31 @@ Native-AA.
 toolchain; the underlying glslang codegen bug in the FFX GLSL LUT sampling path is
 unresolved and left as a follow-up. Permutation selection, blob semantics, constant
 layout, resource sizes and jitter constants were all verified sound in the process.
+
+### Frame interpolation under the Vulkan validation layers
+
+Three defects, each reported by the validation layers on the first frame-interpolation
+dispatch:
+
+- **`r_counters` was never bound.** SPIR-V reflection reports the read-only
+  `buffer r_counters` as a storage buffer, so it arrives in the UAV-buffer list, and
+  the frame-interpolation UAV name table held only `rw_counters`.
+  `patchResourceBindings` returns at the first unmatched name and its caller ignores
+  the result, so every binding after it was left pointing at the null resource. The
+  table now maps `r_counters` as well.
+- **The descriptor pool dropped its storage-buffer entry.** `poolSizeCount` was 5 for
+  a six-entry array (the sampler entry appears twice), so the pool held no
+  `STORAGE_BUFFER` descriptors.
+- **Image views were destroyed while in flight.** Each effect context keeps a ring of
+  per-frame dynamic image views and advances it on every `UnregisterResources`.
+  Interpolation-only frame interpolation unregisters twice per frame (prepare and
+  dispatch), so a ring of `FFX_MAX_QUEUED_FRAMES` (4) slots destroyed the previous
+  frame's views while that frame was still executing. The view ring is now
+  `FFX_VK_VIEW_QUEUED_FRAMES` = 2 × `FFX_MAX_QUEUED_FRAMES` slots; descriptor-set and
+  constant-buffer rings are unchanged.
+
+With these, a frame-interpolation frame is clean under both core and synchronization
+validation.
 
 ### Diagnostics
 
