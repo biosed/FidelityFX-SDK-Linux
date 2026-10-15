@@ -65,9 +65,10 @@ Two changes are shared with Windows deliberately, both of them fixes:
 development machine has no MSVC or Windows SDK. What *is* verified is that AMD's
 `FidelityFX_SC.exe` runs correctly under Wine and that its output agrees with
 `ffx_sc_native.py`: for the same shader and arguments, both produce permutation tables
-and reflection data that are identical (same CBV/SRV/UAV counts, same table shape). The
-SPIR-V blob itself differs, because the bundled `glslangValidator.exe` is 11.12.0 while
-the system glslang used by the native path is 16.4.0.
+and reflection data that are identical (same CBV/SRV/UAV counts, same table shape,
+read-only storage buffers as SRVs). The SPIR-V blob itself differs, because the bundled
+`glslangValidator.exe` is 11.12.0 while the system glslang used by the native path is
+16.6.0.
 
 ---
 
@@ -83,10 +84,10 @@ The versions this fork is verified against:
 | Tool | Verified version |
 | --- | --- |
 | GCC | 16.2.1 |
-| CMake | 4.4.3 |
+| CMake | 4.4.4 |
 | Python | 3.14.7 |
-| glslang | 16.4.0 |
-| Vulkan headers | 1.4.357 |
+| glslang | 16.6.0 |
+| Vulkan headers | 1.4.363 |
 
 Nothing here is pinned to those versions; they are simply what the port was built and
 tested with.
@@ -141,7 +142,8 @@ replacement that produces byte-compatible permutation headers:
 - expands the permutation option space and compiles through `glslangValidator`,
   in parallel;
 - performs SPIR-V reflection by parsing the binary directly — descriptor bindings,
-  sets, counts and storage classes — rather than shelling out to a reflection tool;
+  sets, counts, storage classes and `NonWritable` block members — rather than
+  shelling out to a reflection tool;
 - deduplicates identical blobs by MD5 after compilation.
 
 `sdk/CMakeLists.txt` selects it automatically on `UNIX`. A Wine wrapper
@@ -232,12 +234,16 @@ layout, resource sizes and jitter constants were all verified sound in the proce
 Three defects, each reported by the validation layers on the first frame-interpolation
 dispatch:
 
-- **`r_counters` was never bound.** SPIR-V reflection reports the read-only
-  `buffer r_counters` as a storage buffer, so it arrives in the UAV-buffer list, and
-  the frame-interpolation UAV name table held only `rw_counters`.
-  `patchResourceBindings` returns at the first unmatched name and its caller ignores
-  the result, so every binding after it was left pointing at the null resource. The
-  table now maps `r_counters` as well.
+- **`r_counters` was never bound.** `ffx_sc_native.py` dropped `OpDecorate`
+  instructions without a literal operand, `NonWritable` among them, and never read
+  `OpMemberDecorate`, so it filed every read-only storage buffer as a UAV. The
+  read-only `buffer r_counters` then missed the frame-interpolation UAV name table,
+  which holds only `rw_counters`. `patchResourceBindings` returns at the first
+  unmatched name and its caller ignores the result, so every binding after it was left
+  pointing at the null resource. The reflection now files a storage buffer as an SRV
+  when any member of its block is `NonWritable`, the rule SPIRV-Reflect applies inside
+  `FidelityFX_SC.exe`. Across the 300 generated blobs that changes one classification,
+  `r_counters` in `ffx_frameinterpolation_pass`, which binds through the SRV table.
 - **The descriptor pool dropped its storage-buffer entry.** `poolSizeCount` was 5 for
   a six-entry array (the sampler entry appears twice), so the pool held no
   `STORAGE_BUFFER` descriptors.

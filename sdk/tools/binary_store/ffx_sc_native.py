@@ -39,6 +39,7 @@ OP_TYPE_ARRAY        = 28
 OP_TYPE_RUNTIME_ARRAY = 29
 OP_VARIABLE          = 59
 OP_DECORATE          = 71
+OP_MEMBER_DECORATE   = 72
 OP_TYPE_ACCELERATION_STRUCTURE = 5341
 
 # Decorations
@@ -99,6 +100,7 @@ def reflect_spirv(spirv_bytes):
     variables = {}      # result_id -> (type_id, storage_class)
     type_pointers = {}  # result_id -> (storage_class, pointed_type_id)
     type_info = {}      # id -> type descriptor tuple
+    non_writable_member_structs = set()
 
     pos = 5  # skip header
     while pos < len(words):
@@ -115,11 +117,15 @@ def reflect_spirv(spirv_bytes):
             if name_str:
                 names[target_id] = name_str
 
-        elif opcode == OP_DECORATE and len(operands) >= 3:
+        elif opcode == OP_DECORATE and len(operands) >= 2:
             target_id = operands[0]
             decoration = operands[1]
-            value = operands[2]
+            value = operands[2] if len(operands) >= 3 else None
             decorations.setdefault(target_id, {})[decoration] = value
+
+        elif opcode == OP_MEMBER_DECORATE and len(operands) >= 3:
+            if operands[2] == DECORATION_NON_WRITABLE:
+                non_writable_member_structs.add(operands[0])
 
         elif opcode == OP_VARIABLE and len(operands) >= 3:
             result_type = operands[0]
@@ -270,8 +276,9 @@ def reflect_spirv(spirv_bytes):
             # UBO = constant buffer
             result['cbv'].append((name, binding, count if count > 0 else 1, desc_set))
         elif storage_class == STORAGE_STORAGE_BUFFER:
-            # SSBO: check NonWritable to distinguish SRV from UAV
-            if non_writable or _check_member_non_writable(var_id, decorations):
+            # SRV when any block member is NonWritable: SPIRV-Reflect's rule,
+            # which FidelityFX_SC.exe classifies by.
+            if non_writable or actual_type_id in non_writable_member_structs:
                 result['srv_buf'].append((name, binding, count if count > 0 else 1, desc_set))
             else:
                 result['uav_buf'].append((name, binding, count if count > 0 else 1, desc_set))
@@ -288,15 +295,6 @@ def reflect_spirv(spirv_bytes):
             # Otherwise skip unknown types.
 
     return result
-
-
-def _check_member_non_writable(var_id, decorations):
-    """Check if any MemberDecorate marks this as NonWritable."""
-    # For simplicity, we rely on the variable-level NonWritable check.
-    # MemberDecorate is handled via OP_MEMBER_DECORATE (opcode 72).
-    # The main parse loop doesn't collect it, but FidelityFX SSBOs
-    # use variable-level decorations, so this is sufficient.
-    return False
 
 
 def _empty_reflection():
