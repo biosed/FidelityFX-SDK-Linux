@@ -295,6 +295,16 @@ int main(int argc, char** argv) {
                 std::printf("ffxDispatch frame 1 (history): %u\n", dispatched);
             }
             if (dispatched == FFX_API_RETURN_OK) {
+                // Exercise the optional RCAS pass on retained history. A
+                // spatially constant image has no edge to sharpen, so RCAS
+                // must preserve the same linear colour checked below.
+                frame.jitterOffset = {0.25f, -5.0f / 18.0f};
+                frame.enableSharpening = true;
+                frame.sharpness = 0.3f;
+                dispatched = dispatch(&context, &frame.header);
+                std::printf("ffxDispatch frame 2 (history + RCAS 0.3): %u\n", dispatched);
+            }
+            if (dispatched == FFX_API_RETURN_OK) {
                 transition(cmd, output.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
                            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
