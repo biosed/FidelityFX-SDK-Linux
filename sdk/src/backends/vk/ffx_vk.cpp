@@ -23,6 +23,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdlib>
+#include <mutex>
 #include <new>
 
 #include <FidelityFX/host/ffx_interface.h>
