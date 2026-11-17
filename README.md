@@ -133,11 +133,14 @@ ffx-api/bin/ffx_api_vk_smoke \
     ffx-api/build_linux/libamd_fidelityfx_vk.so
 ```
 
-The smoke test creates a 64x64 native-AA context, records and submits one full FSR3
-dispatch, reads its output back, and fails if the dispatch did not write pixels. The
-`VK_X64` spelling is the SDK's existing backend selector; on Linux the binaries use the
-configure host's actual architecture. Keep the build tree together: the loader's
-origin-relative runpath resolves its Vulkan backend under that tree.
+The smoke test creates a 64x64 native-AA context, records reset and retained-history
+FSR3 frames, and reads the second output back. It fails on an unwritten output, a
+non-finite value, or a mean RGBA channel more than 0.02 away from the constant linear
+input `(0.25, 0.5, 0.75, 1.0)`. This catches zero/white output and accidental colour-domain
+conversion as well as loader or dispatch failure. The `VK_X64` spelling is the SDK's
+existing backend selector; on Linux the binaries use the configure host's actual
+architecture. Keep the build tree together: the loader's origin-relative runpath
+resolves its Vulkan backend under that tree.
 
 ### Output
 

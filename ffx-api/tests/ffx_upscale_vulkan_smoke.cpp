@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cwchar>
+#include <limits>
 #include <vector>
 
 #include <ffx_api/ffx_api.h>
@@ -101,6 +104,47 @@ void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout old_layout, Vk
     dependency.imageMemoryBarrierCount = 1;
     dependency.pImageMemoryBarriers = &image_barrier;
     vkCmdPipelineBarrier2(cmd, &dependency);
+}
+
+float half_to_float(uint16_t bits) {
+    const unsigned exponent = (bits >> 10) & 0x1fu;
+    const unsigned mantissa = bits & 0x3ffu;
+    float value;
+    if (exponent == 0)
+        value = std::ldexp((float)mantissa, -24);
+    else if (exponent == 0x1f)
+        value = mantissa ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
+    else
+        value = std::ldexp((float)(0x400u + mantissa), (int)exponent - 25);
+    return bits & 0x8000u ? -value : value;
+}
+
+bool native_color_ok(const void* mapped, size_t pixels) {
+    const auto* half = static_cast<const uint16_t*>(mapped);
+    const std::array<double, 4> expected{0.25, 0.5, 0.75, 1.0};
+    std::array<double, 4> sum{};
+    std::array<float, 4> low{INFINITY, INFINITY, INFINITY, INFINITY};
+    std::array<float, 4> high{-INFINITY, -INFINITY, -INFINITY, -INFINITY};
+    for (size_t pixel = 0; pixel < pixels; ++pixel) {
+        for (size_t channel = 0; channel < 4; ++channel) {
+            const float value = half_to_float(half[pixel * 4 + channel]);
+            if (!std::isfinite(value)) return false;
+            sum[channel] += value;
+            low[channel] = std::min(low[channel], value);
+            high[channel] = std::max(high[channel], value);
+        }
+    }
+    bool ok = true;
+    for (size_t channel = 0; channel < 4; ++channel) {
+        const double mean = sum[channel] / pixels;
+        std::printf("output channel %zu: mean %.6f, range %.6f..%.6f, expected %.2f\n", channel, mean,
+                    low[channel], high[channel], expected[channel]);
+        // A constant native-resolution input must survive the temporal pass.
+        // This rejects zero/white output and accidental perceptual/linear
+        // conversion while allowing small implementation-specific FP16 noise.
+        if (std::fabs(mean - expected[channel]) > 0.02) ok = false;
+    }
+    return ok;
 }
 
 int main(int argc, char** argv) {
@@ -240,7 +284,16 @@ int main(int argc, char** argv) {
             frame.cameraFovAngleVertical = 1.0f;
             frame.viewSpaceToMetersFactor = 1.0f;
             dispatched = dispatch(&context, &frame.header);
-            std::printf("ffxDispatch: %u\n", dispatched);
+            std::printf("ffxDispatch frame 0 (reset): %u\n", dispatched);
+            if (dispatched == FFX_API_RETURN_OK) {
+                // Exercise retained temporal history too. The input is
+                // constant, so changing to the next Halton jitter must not
+                // change its native-resolution colour.
+                frame.reset = false;
+                frame.jitterOffset = {-0.25f, 1.0f / 6.0f};
+                dispatched = dispatch(&context, &frame.header);
+                std::printf("ffxDispatch frame 1 (history): %u\n", dispatched);
+            }
             if (dispatched == FFX_API_RETURN_OK) {
                 transition(cmd, output.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
@@ -267,7 +320,7 @@ int main(int argc, char** argv) {
                     const auto* bytes = static_cast<const unsigned char*>(mapped);
                     const size_t nonzero = std::count_if(bytes, bytes + readback.size, [](unsigned char value) { return value != 0; });
                     std::printf("output non-zero bytes: %zu/%zu\n", nonzero, (size_t)readback.size);
-                    if (!nonzero) submitted = VK_ERROR_UNKNOWN;
+                    if (!nonzero || !native_color_ok(mapped, 64u * 64u)) submitted = VK_ERROR_UNKNOWN;
                     vkUnmapMemory(device, readback.memory);
                 } else {
                     submitted = VK_ERROR_MEMORY_MAP_FAILED;
